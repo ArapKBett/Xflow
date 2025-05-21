@@ -371,4 +371,403 @@ class BinanceConnectorFuture(ConnectorBase):
                     BinanceConnectorFuture._candles[symbol][timeframe] = candles
                     BinanceConnectorFuture._candles_polling_tasks[symbol][timeframe] = asyncio.create_task(
                         self._process_instrument_candles_ws(symbol, timeframe),
-                        name=f"Task_BinanceConnectorFuture_candles_{sy
+                        name=f"Task_BinanceConnectorFuture_candles_{symbol}_{timeframe.name}"
+                    )
+                    await asyncio.sleep(0.5)
+                    return None
+            return BinanceConnectorFuture._candles[symbol][timeframe][-n:].to_dict(orient="records")
+
+    async def get_last_formed_candles(self, symbol: str, timeframe: Timeframe, n: int):
+        """
+        Retrieve the last n formed (closed) candles, excluding the current unformed candle.
+
+        Args:
+            symbol (str): Trading pair symbol.
+            timeframe (Timeframe): The timeframe for candles.
+            n (int): Number of formed candles to retrieve.
+
+        Returns:
+            list: List of dictionaries containing candle data.
+        """
+        candles = await self.get_last_candles(symbol, timeframe, n + 1)
+        return candles[:-1] if candles else []
+
+    async def get_cur_price(self, symbol: str) -> dict:
+        """
+        Fetch the current bid, ask, and last price for a symbol.
+
+        Args:
+            symbol (str): Trading pair symbol.
+
+        Returns:
+            dict: Dictionary with keys "bid", "ask", and "last" containing Decimal values.
+        """
+        try:
+            ticker = await self._client.get_ticker(symbol=symbol)
+            return {
+                "bid": Decimal(str(ticker["bidPrice"])),
+                "ask": Decimal(str(ticker["askPrice"])),
+                "last": Decimal(str(ticker["lastPrice"]))
+            }
+        except Exception as e:
+            self._logger.error(f"Failed to fetch current price for {symbol}: {str(e)}\n{traceback.format_exc()}")
+            raise
+
+    async def get_last_balance(self) -> Dict[str, Balance]:
+        """
+        Fetch the current account balance.
+
+        Returns:
+            Dict[str, Balance]: Dictionary of Balance objects keyed by currency, with Decimal values.
+        """
+        try:
+            account = await self._client.get_account()
+            balances = {}
+            for asset in account["assets"]:
+                currency = asset["asset"]
+                balances[currency] = Balance(
+                    currency=currency,
+                    available=Decimal(str(asset["availableBalance"])),
+                    frozen=Decimal(str(asset["marginBalance"])) - Decimal(str(asset["availableBalance"])),
+                    total=Decimal(str(asset["marginBalance"]))
+                )
+            return balances
+        except Exception as e:
+            self._logger.error(f"Failed to fetch balance: {str(e)}\n{traceback.format_exc()}")
+            raise
+
+    async def get_last_open_orders(self, order: Order) -> Dict[str, Order]:
+        """
+        Fetch all open orders for a symbol.
+
+        Args:
+            order (Order): Order object containing the symbol to query.
+
+        Returns:
+            Dict[str, Order]: Dictionary of open orders keyed by order ID.
+        """
+        try:
+            orders = await self._client.get_open_orders(symbol=order.symbol)
+            result = {}
+            for data in orders:
+                parsed_order = await self._parse_order(data)
+                result[str(data["orderId"])] = parsed_order
+                if parsed_order.id not in [o.id for o in self.order_buffer]:
+                    self.order_buffer.append(parsed_order)
+                    await self._subscribe_order_updates(parsed_order)
+            return result
+        except Exception as e:
+            self._logger.error(f"Failed to fetch open orders for {order.symbol}: {str(e)}\n{traceback.format_exc()}")
+            raise
+
+    async def create_order(self, symbol: str, side: Direction, order_type: OrderType, price: Optional[Decimal] = None, qty: Optional[Decimal] = None, stop_price: Optional[Decimal] = None) -> Order:
+        """
+        Create a new order on Binance Futures.
+
+        Args:
+            symbol (str): Trading pair symbol.
+            side (Direction): BUY or SELL.
+            order_type (OrderType): MARKET, LIMIT, or STOP.
+            price (Decimal, optional): Price for limit orders.
+            qty (Decimal, optional): Quantity in base currency (e.g., BTC).
+            stop_price (Decimal, optional): Stop price for stop orders.
+
+        Returns:
+            Order: Created order object.
+
+        Raises:
+            ValueError: If the instrument or quantity is invalid.
+        """
+        instrument = await self.get_instrument_spec(symbol)
+        if not instrument:
+            raise ValueError(f"Instrument {symbol} not found")
+        if qty:
+            if qty % instrument.lot_step_market != 0:
+                raise ValueError(f"Order quantity must be a multiple of lot size {instrument.lot_step_market}")
+            qty_str = str(qty)
+        else:
+            qty_str = None
+        # Map OrderType to Binance order types
+        binance_order_type = {
+            OrderType.MARKET: ORDER_TYPE_MARKET,
+            OrderType.LIMIT: ORDER_TYPE_LIMIT,
+            OrderType.STOP: ORDER_TYPE_STOP_MARKET
+        }.get(order_type)
+        # Validate and convert limit/stop orders
+        market_prices = await self.get_cur_price(symbol)
+        market_price = market_prices["last"]
+        params = {
+            "symbol": symbol,
+            "side": side.value,
+            "type": binance_order_type,
+            "quantity": qty_str,
+            "newOrderRespType": "RESULT"
+        }
+        if order_type == OrderType.LIMIT and price:
+            # Binance doesn't provide explicit max_buy/min_sell, approximate with market prices
+            max_buy = market_prices["ask"] * Decimal("1.05")  # 5% above ask
+            min_sell = market_prices["bid"] * Decimal("0.95")  # 5% below bid
+            if (side == Direction.BUY and price > max_buy) or (side == Direction.SELL and price < min_sell):
+                self._logger.warning(f"Converting invalid limit order to market order: {symbol}, side={side.value}, price={price}")
+                params["type"] = ORDER_TYPE_MARKET
+            else:
+                params["price"] = str(price)
+                params["timeInForce"] = "GTC"
+        elif order_type == OrderType.STOP and stop_price:
+            if (side == Direction.BUY and stop_price <= market_price) or (side == Direction.SELL and stop_price >= market_price):
+                self._logger.warning(f"Converting stop order to market order: {symbol}, side={side.value}, stop_price={stop_price}")
+                params["type"] = ORDER_TYPE_MARKET
+            else:
+                params["stopPrice"] = str(stop_price)
+        try:
+            response = await self._client.create_order(**params)
+            order = await self._parse_order(response)
+            self.order_buffer.append(order)
+            await self._subscribe_order_updates(order)
+            return order
+        except Exception as e:
+            self._logger.error(f"Failed to create order for {symbol}: {str(e)}\n{traceback.format_exc()}")
+            raise
+
+    async def cancel_order(self, symbol: str, order_id: str):
+        """
+        Cancel an order by ID.
+
+        Args:
+            symbol (str): Trading pair symbol.
+            order_id (str): Order ID to cancel.
+        """
+        try:
+            await self._client.cancel_order(symbol=symbol, orderId=order_id)
+            for order in self.order_buffer:
+                if order.id == order_id:
+                    order.status = OrderStatus.CANCELED
+                    break
+        except Exception as e:
+            self._logger.error(f"Failed to cancel order {order_id} for {symbol}: {str(e)}\n{traceback.format_exc()}")
+            raise
+
+    async def get_order(self, order: Order) -> Order:
+        """
+        Retrieve or update an order, using the local buffer or REST API.
+
+        Args:
+            order (Order): Order object to retrieve.
+
+        Returns:
+            Order: Updated order object.
+        """
+        for buffered_order in self.order_buffer:
+            if buffered_order.id == order.id:
+                return buffered_order
+        try:
+            response = await self._client.get_order(symbol=order.symbol, orderId=order.id)
+            order = await self._parse_order(response)
+            self.order_buffer.append(order)
+            await self._subscribe_order_updates(order)
+            return order
+        except Exception as e:
+            self._logger.error(f"Failed to fetch order {order.id} for {order.symbol}: {str(e)}\n{traceback.format_exc()}")
+            raise
+
+    async def _parse_order(self, data: dict) -> Order:
+        """
+        Parse Binance order data into an Order object.
+
+        Args:
+            data (dict): Order data from Binance API.
+
+        Returns:
+            Order: Parsed order object with Decimal values.
+        """
+        instrument = await self.get_instrument_spec(data["symbol"])
+        volume = Decimal(str(data["origQty"]))
+        volume_executed = Decimal(str(data["executedQty"]))
+        status_map = {
+            "NEW": OrderStatus.ACTIVE,
+            "PARTIALLY_FILLED": OrderStatus.PARTIALLY_EXECUTED,
+            "FILLED": OrderStatus.EXECUTED,
+            "CANCELED": OrderStatus.CANCELED,
+            "EXPIRED": OrderStatus.CANCELED,
+            "REJECTED": OrderStatus.CANCELED
+        }
+        price = Decimal("0")
+        if data["status"] in ["FILLED", "PARTIALLY_FILLED"]:
+            trades = await self._get_order_trades(data["orderId"], data["symbol"])
+            total_volume = sum(Decimal(str(trade["qty"])) for trade in trades)
+            if total_volume > 0:
+                price = sum(Decimal(str(trade["price"])) * Decimal(str(trade["qty"])) for trade in trades) / total_volume
+        order_type = {
+            ORDER_TYPE_MARKET: OrderType.MARKET,
+            ORDER_TYPE_LIMIT: OrderType.LIMIT,
+            ORDER_TYPE_STOP_MARKET: OrderType.STOP
+        }.get(data["type"], OrderType.MARKET)
+        return Order(
+            id=str(data["orderId"]),
+            symbol=data["symbol"],
+            side=Direction.SELL if data["side"] == SIDE_SELL else Direction.BUY,
+            order_type=order_type,
+            status=status_map.get(data["status"], OrderStatus.ACTIVE),
+            theor_price=Decimal(str(data["price"])) if data["price"] != "0" else Decimal("0"),
+            price=price,
+            volume=volume,
+            volume_executed=volume_executed,
+            commission=Decimal(str(data.get("commission", "0"))),
+            datetime=str(data["updateTime"])
+        )
+
+    async def _get_order_trades(self, order_id: str, symbol: str) -> List[dict]:
+        """
+        Fetch trades associated with an order.
+
+        Args:
+            order_id (str): Order ID.
+            symbol (str): Trading pair symbol.
+
+        Returns:
+            List[dict]: List of trade data.
+        """
+        try:
+            return await self._client.get_my_trades(symbol=symbol, orderId=order_id)
+        except Exception as e:
+            self._logger.error(f"Failed to fetch trades for order {order_id} in {symbol}: {str(e)}\n{traceback.format_exc()}")
+            raise
+
+    async def _get_price_limits(self, symbol: str) -> dict:
+        """
+        Approximate price limits for a symbol based on current market prices.
+
+        Args:
+            symbol (str): Trading pair symbol.
+
+        Returns:
+            dict: Dictionary with "max_buy" and "min_sell" as Decimal values.
+        """
+        prices = await self.get_cur_price(symbol)
+        return {
+            "max_buy": prices["ask"] * Decimal("1.05"),  # 5% above ask
+            "min_sell": prices["bid"] * Decimal("0.95")   # 5% below bid
+        }
+
+    async def _websocket_handler(self):
+        """
+        Handle WebSocket connections for order updates.
+        Subscribes to the user data stream to receive real-time order updates.
+        """
+        while True:
+            try:
+                async with websockets.connect(f"wss://fstream.binance.com/ws/{self.api_key}") as ws:
+                    # Get listen key for user data stream
+                    listen_key = (await self._client.get_listen_key())["listenKey"]
+                    await ws.send(json.dumps({"method": "SUBSCRIBE", "params": [f"{listen_key}@order"], "id": 1}))
+                    self._logger.info("BinanceFuture WebSocket started for order updates.")
+                    async for message in ws:
+                        data = json.loads(message)
+                        if data.get("e") == "error":
+                            self._logger.error(f"WebSocket error: {data.get('m')}")
+                            continue
+                        if data.get("e") == "executionReport":
+                            await self._update_buffered_order(data)
+            except Exception as e:
+                self._logger.error(f"BinanceFuture WebSocket error: {str(e)}\n{traceback.format_exc()}")
+                await asyncio.sleep(5)
+
+    async def _subscribe_order_updates(self, order: Order):
+        """
+        Subscribe to order updates via WebSocket.
+        Handled by the user data stream in _websocket_handler.
+        """
+        pass
+
+    async def _update_buffered_order(self, data: dict):
+        """
+        Update an order in the buffer with WebSocket data.
+
+        Args:
+            data (dict): WebSocket order update data.
+        """
+        for buffered_order in self.order_buffer:
+            if buffered_order.id == str(data["i"]):
+                order = await self._parse_order({
+                    "orderId": data["i"],
+                    "symbol": data["s"],
+                    "side": data["S"],
+                    "type": data["o"],
+                    "status": data["X"],
+                    "price": data["p"],
+                    "origQty": data["q"],
+                    "executedQty": data["z"],
+                    "updateTime": data["T"],
+                    "commission": data.get("n", "0")
+                })
+                self.order_buffer[self.order_buffer.index(buffered_order)] = order
+
+    # Override helper methods with Decimal and Direction
+    async def create_limit_order(self, symbol: str, side: Direction, price: Decimal, qty: Decimal) -> Order:
+        """
+        Create a limit order.
+
+        Args:
+            symbol (str): Trading pair symbol.
+            side (Direction): BUY or SELL.
+            price (Decimal): Order price.
+            qty (Decimal): Order quantity in base currency.
+
+        Returns:
+            Order: Created order object.
+        """
+        return await self.create_order(symbol, side, OrderType.LIMIT, price=price, qty=qty)
+
+    async def create_market_order(self, symbol: str, side: Direction, qty: Decimal) -> Order:
+        """
+        Create a market order.
+
+        Args:
+            symbol (str): Trading pair symbol.
+            side (Direction): BUY or SELL.
+            qty (Decimal): Order quantity in base currency.
+
+        Returns:
+            Order: Created order object.
+        """
+        return await self.create_order(symbol, side, OrderType.MARKET, qty=qty)
+
+    async def create_limit_buy_order(self, symbol: str, price: Decimal, qty: Decimal) -> Order:
+        """
+        Create a limit buy order.
+
+        Args:
+            symbol (str): Trading pair symbol.
+            price (Decimal): Order price.
+            qty (Decimal): Order quantity in base currency.
+
+        Returns:
+            Order: Created order object.
+        """
+        return await self.create_limit_order(symbol, Direction.SELL, price, qty)
+
+    async def create_market_buy_order(self, symbol: str, qty: Decimal) -> Order:
+        """
+        Create a market buy order.
+
+        Args:
+            symbol (str): Trading pair symbol.
+            qty (Decimal): Order quantity in base currency.
+
+        Returns:
+            Order: Created order object.
+        """
+        return await self.create_market_order(symbol, Direction.BUY, qty)
+
+    async def create_market_sell_order(self, symbol: str, qty: Decimal) -> Order:
+        """
+        Create a market sell order.
+
+        Args:
+            symbol (str): Trading pair symbol.
+            qty (Decimal): Order quantity in base currency.
+
+        Returns:
+            Order: Created order object.
+        """
+        return await self.create_market_order(symbol, Direction.SELL, qty)
