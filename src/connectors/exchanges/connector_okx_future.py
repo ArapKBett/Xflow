@@ -1,32 +1,26 @@
 import asyncio
 import json
 import traceback
-from datetime import datetime, timedelta
+from datetime import datetime
 from decimal import Decimal
-from typing import Dict, List, Optional
-
-import pandas as pd
-from websockets.legacy.client import WebSocketClientProtocol
-
+from typing import Dict, Optional
 from src.connectors.clients.okx_client import OKXAsyncClient
 from src.entities.instrument import Instrument
-from src.entities.timeframe import Timeframe
-from src.entities.order import Order, OrderStatus, OrderType
+from src.entities.order import Order, OrderType, OrderStatus
 from src.entities.direction import Direction
 from src.entities.balance import Balance
-from src.utils.common_functions import timeframe_to_timedelta
 from src.logger.logger import get_logger
 from ..connector_base import ConnectorBase, ConnectorType
 
 
 class ConnectorOkxFuture(ConnectorBase):
     """
-    OKX Futures connector for interacting with OKX's REST and WebSocket APIs.
-    Supports fetching live and historical trade data, placing/cancelling orders, tracking open orders, and real-time balances.
+    OKX Futures connector implementing the ConnectorBase interface for futures trading.
+    Handles instrument specifications, candles, orders, and balances using OKX's REST and WebSocket APIs.
     """
 
     connector_type: ConnectorType = ConnectorType.OkxFuture
-    _CANDLES_DEPTH: int = 1000  # Maximum number of candles to store per timeframe
+    _logger = get_logger("ConnectorOkxFuture")
 
     def __init__(self, config: dict):
         """
@@ -36,173 +30,162 @@ class ConnectorOkxFuture(ConnectorBase):
             config (dict): Configuration dictionary with API key, secret, passphrase, and testnet flag.
         """
         super().__init__(config)
-        self._logger = get_logger(self.__module__)
         self._client = None
         self._api_key = config.get('API_KEY')
         self._api_secret = config.get('API_SEC')
         self._passphrase = config.get('PASSPHRASE')
         self._testnet = config.get('TESTNET', False)
 
-        # Concurrency locks for safe multi-threaded operations
-        self._instruments_update_lock = asyncio.Lock()
-        self._candles_update_lock = asyncio.Lock()
-        self._orders_update_lock = asyncio.Lock()
-        self._balances_update_lock = asyncio.Lock()
-
-        # Caches for data
-        self._instruments_spec: Dict[str, Instrument] = {}
-        self._candles: Dict[str, Dict[Timeframe, Optional[pd.DataFrame]]] = {}
-        self._open_orders: Dict[str, Dict[str, Order]] = {}
-        self._balances: Dict[str, Balance] = {}
-
-    @property
-    def tf_map(self) -> Dict[Timeframe, str]:
+    async def _initialize_client(self):
         """
-        Timeframe-to-OKX interval mapping.
+        Initialize the OKXAsyncClient with API credentials.
+        """
+        if not self._client:
+            self._client = await OKXAsyncClient.create(
+                api_key=self._api_key,
+                api_secret=self._api_secret,
+                passphrase=self._passphrase,
+                testnet=self._testnet
+            )
+            self._logger.info("OKXAsyncClient initialized.")
+
+    async def create_order(self, symbol: str, side: Direction, order_type: OrderType,
+                           price: Optional[Decimal] = None, qty: Optional[Decimal] = None,
+                           stop_price: Optional[Decimal] = None) -> Order:
+        """
+        Create a new order on OKX Futures.
+
+        Args:
+            symbol (str): Trading pair symbol (e.g., "BTC-USDT-SWAP").
+            side (Direction): BUY or SELL.
+            order_type (OrderType): MARKET, LIMIT, or STOP.
+            price (Decimal, optional): Price for limit orders.
+            qty (Decimal, optional): Quantity in base currency (e.g., BTC).
+            stop_price (Decimal, optional): Stop price for stop orders.
 
         Returns:
-            Dict[Timeframe, str]: Mapping of Timeframe enums to OKX-supported intervals.
+            Order: Created order object.
+
+        Raises:
+            ValueError: If the instrument or quantity is invalid.
         """
-        return {
-            Timeframe.M1: "1m",
-            Timeframe.M5: "5m",
-            Timeframe.M15: "15m",
-            Timeframe.M30: "30m",
-            Timeframe.H1: "1H",
-            Timeframe.H4: "4H",
-            Timeframe.D1: "1Dutc",
-            Timeframe.W1: "1Wutc",
+        await self._initialize_client()
+
+        instrument = await self.get_instrument_spec(symbol)
+        if not instrument:
+            raise ValueError(f"Instrument {symbol} not found")
+
+        # Validate quantity
+        if qty:
+            contracts = qty / instrument.contract_size
+            if contracts % instrument.lot_step_market != 0:
+                raise ValueError(f"Order quantity must be a multiple of lot size {instrument.lot_step_market}")
+            qty_str = str(int(contracts))
+        else:
+            qty_str = None
+
+        # Prepare order parameters
+        params = {
+            "instId": symbol,
+            "tdMode": "cross",
+            "side": side.value.lower(),
+            "ordType": order_type.value,
+            "sz": qty_str
         }
 
-    async def _start_network(self):
-        """
-        Start the connector's network connections, including REST and WebSocket clients.
-        """
-        self._logger.info("Starting OKX Futures connector...")
-        self._client = await OKXAsyncClient.create(
-            api_key=self._api_key,
-            api_secret=self._api_secret,
-            passphrase=self._passphrase,
-            testnet=self._testnet,
-        )
-        self._logger.info("OKX client initialized successfully.")
+        # Handle limit orders
+        if order_type == OrderType.LIMIT and price:
+            params["px"] = str(price)
 
-        # Start background tasks for polling and WebSocket handling
-        await self._start_polling_tasks()
+        # Handle stop orders
+        elif order_type == OrderType.STOP and stop_price:
+            params["ordType"] = "conditional"  # OKX uses "conditional" for stop orders
+            params["tpTriggerPx"] = str(stop_price)
+            params["tpOrdPx"] = "-1"  # Market order on trigger
 
-    async def _start_polling_tasks(self):
-        """
-        Start tasks for polling instrument specifications and other data.
-        """
-        if not hasattr(self, "_instruments_spec_polling_task"):
-            self._instruments_spec_polling_task = asyncio.create_task(
-                self._instruments_spec_polling_loop(),
-                name="Task_ConnectorOkxFuture_InstrumentsSpecPolling",
-            )
-            self._logger.info("Started polling task for instrument specifications.")
+        # Handle market orders
+        elif order_type == OrderType.MARKET:
+            params.pop("px", None)
 
-    async def _stop_network(self):
-        """
-        Stop all background tasks and close connections.
-        """
-        self._logger.info("Stopping OKX Futures connector...")
-
-        # Cancel polling tasks
-        if hasattr(self, "_instruments_spec_polling_task"):
-            self._instruments_spec_polling_task.cancel()
-            self._logger.info("Stopped polling task for instrument specifications.")
-
-        # Close OKX client connection
-        if self._client:
-            await self._client.close()
-            self._logger.info("OKX client connection closed.")
-            self._client = None
-
-    async def _update_instruments_spec(self):
-        """
-        Fetch and update instrument specifications from OKX.
-        """
-        async with self._instruments_update_lock:
-            try:
-                self._logger.info("Fetching instrument specifications from OKX...")
-                response = await self._client.get_instruments()
-                instruments_data = response.get("data", [])
-
-                for instrument in instruments_data:
-                    symbol = instrument["instId"]
-                    self._instruments_spec[symbol] = Instrument(
-                        symbol=symbol,
-                        tick_size=Decimal(instrument["tickSz"]),
-                        contract_size=Decimal(instrument["ctVal"]),
-                        min_qty_market=Decimal(instrument["minSz"]),
-                        lot_step_market=Decimal(instrument["lotSz"]),
-                    )
-                self._logger.info(f"Updated {len(self._instruments_spec)} instrument specifications.")
-            except Exception as e:
-                self._logger.error(f"Failed to update instrument specifications: {e}\n{traceback.format_exc()}")
+        try:
+            response = await self._client.create_order(**params)
+            ord_id = response.get("data", [{}])[0].get("ordId")
+            order_data = await self._client.get_order(symbol, ord_id)
+            return self._parse_order_from_okx_data(order_data.get("data", [])[0])
+        except Exception as e:
+            self._logger.error(f"Failed to create order for {symbol}: {e}\n{traceback.format_exc()}")
+            raise
 
     async def get_instrument_spec(self, symbol: str) -> Instrument:
         """
-        Retrieve the cached instrument specification for a symbol.
+        Retrieve the instrument specification for a symbol.
 
         Args:
-            symbol (str): Symbol of the trading pair (e.g., BTC-USDT-SWAP).
+            symbol (str): Trading pair symbol (e.g., "BTC-USDT-SWAP").
 
         Returns:
-            Instrument: The instrument specification object.
-
-        Raises:
-            ValueError: If the specified symbol is not found.
+            Instrument: The instrument specification.
         """
-        async with self._instruments_update_lock:
-            if symbol not in self._instruments_spec:
-                raise ValueError(f"Instrument {symbol} not found.")
-            return self._instruments_spec[symbol]
-
-    async def _fetch_candles_rest_api(self, symbol: str, timeframe: Timeframe, n: int) -> pd.DataFrame:
-        """
-        Fetch historical candles for a symbol and timeframe using OKX REST API.
-
-        Args:
-            symbol (str): Symbol of the trading pair.
-            timeframe (Timeframe): The timeframe for the candles.
-            n (int): Number of candles to fetch.
-
-        Returns:
-            pd.DataFrame: A DataFrame containing the candle data.
-        """
-        self._logger.info(f"Fetching {n} candles for {symbol} {timeframe.name} via REST API...")
+        await self._initialize_client()
         try:
-            bar_interval = self.tf_map[timeframe]
-            response = await self._client.get_candles(inst_id=symbol, bar=bar_interval, limit=n)
-            data = response.get("data", [])
-            df = pd.DataFrame(data, columns=["timestamp", "open", "high", "low", "close", "volume"])
-            df["timestamp"] = pd.to_datetime(df["timestamp"].astype(int), unit="ms")
-            for col in ["open", "high", "low", "close", "volume"]:
-                df[col] = df[col].astype(str).apply(Decimal)  # Ensure Decimal precision
-            df.set_index("timestamp", inplace=True)
-            return df
+            response = await self._client.get_instruments()
+            for item in response.get("data", []):
+                if item["instId"] == symbol:
+                    return Instrument(
+                        symbol=item["instId"],
+                        contract_size=Decimal(item["ctVal"]),
+                        tick_size=Decimal(item["tickSz"]),
+                        min_qty_market=Decimal(item["minSz"]),
+                        lot_step_market=Decimal(item["lotSz"])
+                    )
         except Exception as e:
-            self._logger.error(f"Failed to fetch candles for {symbol}: {e}")
+            self._logger.error(f"Failed to fetch instrument spec for {symbol}: {e}\n{traceback.format_exc()}")
             raise
 
-    async def get_last_candles(self, symbol: str, timeframe: Timeframe, n: int = _CANDLES_DEPTH) -> List[dict]:
+    async def get_cur_price(self, symbol: str) -> Dict[str, Decimal]:
         """
-        Retrieve the last n candles for a symbol and timeframe.
+        Fetch the current bid, ask, and last price for a symbol.
 
         Args:
-            symbol (str): Symbol of the trading pair.
-            timeframe (Timeframe): The timeframe for the candles.
-            n (int): Number of candles to retrieve.
+            symbol (str): Trading pair symbol.
 
         Returns:
-            List[dict]: A list of candles as dictionaries.
+            dict: Dictionary with keys "bid", "ask", and "last" containing Decimal values.
         """
-        async with self._candles_update_lock:
-            try:
-                num_candles = min(n, self._CANDLES_DEPTH)
-                df = await self._fetch_candles_rest_api(symbol, timeframe, num_candles)
-                return df.tail(num_candles).to_dict(orient="records")
-            except Exception as e:
-                self._logger.error(f"Error fetching candles for {symbol} {timeframe.name}: {e}")
-                return []
+        await self._initialize_client()
+        try:
+            ticker = await self._client.get_ticker(symbol)
+            data = ticker.get("data", [])[0]
+            return {
+                "bid": Decimal(data["bidPx"]),
+                "ask": Decimal(data["askPx"]),
+                "last": Decimal(data["last"])
+            }
+        except Exception as e:
+            self._logger.error(f"Failed to fetch current price for {symbol}: {e}\n{traceback.format_exc()}")
+            raise
+
+    def _parse_order_from_okx_data(self, order_data: dict) -> Order:
+        """
+        Parse OKX order data into an Order object.
+
+        Args:
+            order_data (dict): Order data from OKX API.
+
+        Returns:
+            Order: Parsed order object with Decimal values and enums.
+        """
+        ord_id = order_data["ordId"]
+        return Order(
+            id=ord_id,
+            symbol=order_data["instId"],
+            price=Decimal(order_data.get("avgPx", "0")),
+            theor_price=Decimal(order_data.get("px", "0")),
+            volume=Decimal(order_data.get("sz", "0")),
+            volume_executed=Decimal(order_data.get("accFillSz", "0")),
+            commission=Decimal(order_data.get("fee", "0")),
+            datetime=datetime.fromtimestamp(int(order_data.get("uTime", 0)) / 1000) if order_data.get("uTime") else None,
+            side=Direction.BUY if order_data.get("side") == "buy" else Direction.SELL,
+            order_type=OrderType(order_data.get("ordType")),
+            status=OrderStatus(order_data.get("state"))
+        )
