@@ -22,13 +22,13 @@ async def main():
         for candle in candles["data"]:
             print(candle)
 
-        # Test fetching ticker (uncomment to test)
-        # ticker = await client.get_ticker("BTC-USDT-SWAP")
-        # print("Ticker:", ticker)
+        # Test fetching ticker 
+         ticker = await client.get_ticker("BTC-USDT-SWAP")
+         print("Ticker:", ticker)
 
-        # Test fetching balance (requires authentication, uncomment to test)
-        # balance = await client.get_balance()
-        # print("Balance:", balance)
+        # Test fetching balance (requires authentication)
+         balance = await client.get_balance()
+         print("Balance:", balance)
 
     except Exception as e:
         print(f"Error in test: {e}")
