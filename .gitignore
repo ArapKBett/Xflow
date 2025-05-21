@@ -1,9 +1,11 @@
-# Python
+# Python Bytecode and Caches
 __pycache__/
 *.py[cod]
 *.pyo
 *.pyd
 .Python
+
+# Virtual Environments
 env/
 venv/
 ENV/
@@ -11,18 +13,37 @@ ENV/
 dist/
 build/
 
-# Logs
-data/logs/
+# Logs and Temporary Files
 *.log
+logs/
+data/logs/
+*.tmp
+*.swp
 
-# macOS
+# macOS Specific
 .DS_Store
 
-# IDEs
+# IDE and Editor Configurations
 .idea/
 .vscode/
+*.sublime-workspace
+*.sublime-project
 
-# Testing
+# Testing and Coverage
 .pytest_cache/
 coverage/
 *.cov
+htmlcov/
+
+# Jupyter Notebooks
+.ipynb_checkpoints/
+
+# Operating System Files
+Thumbs.db
+desktop.ini
+
+# Other Generated Files
+*.bak
+*.old
+*.orig
+*.rej
