@@ -1,9 +1,22 @@
+# Core dependencies
 pandas>=1.5.0
 numpy>=1.23.0
 websockets>=10.0
 python-binance>=1.0.15
 httpx>=0.23.0
 certifi>=2022.0.0
-# Optional development dependencies 
+
+# Optional visualization tools
+matplotlib>=3.5.0
+plotly>=5.0.0
+
+# Optional development and testing dependencies
 pytest>=7.0.0
 black>=22.0.0
+mypy>=0.991  # For static type checking
+flake8>=6.0.0  # For linting
+isort>=5.10.0  # For import sorting
+
+# Optional documentation tools
+sphinx>=5.0.0
+sphinx-rtd-theme>=1.0.0
