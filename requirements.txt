@@ -3,6 +3,7 @@ numpy>=1.23.0
 websockets>=10.0
 python-binance>=1.0.15
 httpx>=0.23.0
-# Optional development dependencies (uncomment to include)
-# pytest>=7.0.0
-# black>=22.0.0
+certifi>=2022.0.0
+# Optional development dependencies 
+pytest>=7.0.0
+black>=22.0.0
