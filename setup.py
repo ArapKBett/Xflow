@@ -13,10 +13,7 @@ setup(
         "httpx>=0.23.0",
     ],
     python_requires=">=3.8",
-    author="Your Name",
-    author_email="your.email@example.com",
-    description="XFlow: A connector library for OKX and Binance Futures trading with WebSocket and REST APIs.",
-    license="MIT",
+    
     url="https://github.com/dohyunkjuly/xflow",
     classifiers=[
         "Programming Language :: Python :: 3",
@@ -27,7 +24,7 @@ setup(
         "License :: OSI Approved :: MIT License",
         "Operating System :: OS Independent",
         "Development Status :: 3 - Alpha",
-        "Intended Audience :: Developers",
+        "Intended Audience :: Traders",
         "Topic :: Software Development :: Libraries",
     ],
 )
