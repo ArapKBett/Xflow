@@ -14,7 +14,7 @@ setup(
     ],
     python_requires=">=3.8",
     
-    url="https://github.com/dohyunkjuly/xflow",
+    url="https://github.com/ArapKBett/Xflow",
     classifiers=[
         "Programming Language :: Python :: 3",
         "Programming Language :: Python :: 3.8",
