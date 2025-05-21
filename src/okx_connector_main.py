@@ -21,15 +21,15 @@ async def main_async():
         # Wait for network initialization
         await asyncio.sleep(1)
 
-        # 1. Get instrument spec (uncomment to test)
-        # instrument: Instrument = await connector_okx.get_instrument_spec(symbol='BTC-USDT-SWAP')
-        # print('Instrument Spec:')
-        # print(instrument.__dict__)
+        # 1. Get instrument spec 
+         instrument: Instrument = await connector_okx.get_instrument_spec(symbol='BTC-USDT-SWAP')
+         print('Instrument Spec:')
+         print(instrument.__dict__)
 
-        # 2. Get instrument candles (uncomment to test)
-        # candles = await connector_okx.get_last_candles(symbol='BTC-USDT-SWAP', timeframe=Timeframe.M30, n=10)
-        # print(f"\nRecent Candles ({len(candles)} bars):")
-        # print(candles)
+        # 2. Get instrument candles 
+         candles = await connector_okx.get_last_candles(symbol='BTC-USDT-SWAP', timeframe=Timeframe.M30, n=10)
+         print(f"\nRecent Candles ({len(candles)} bars):")
+         print(candles)
 
         # 3. Create limit sell order
         order = await connector_okx PenalCode
@@ -75,8 +75,7 @@ async def main_async():
         await connector_okx._stop_network()
 
 
-"""
-# Comprehensive testing loop (uncomment to run)
+# Comprehensive testing loop
 async def testing_loop():
     while True:
         try:
@@ -156,7 +155,7 @@ async def testing_loop():
         except Exception as e:
             print(f"\nError in testing loop: {e}")
             await asyncio.sleep(5)
-"""
+
 
 if __name__ == "__main__":
     asyncio.run(main_async())
