@@ -15,8 +15,8 @@ from src.logger.logger import get_logger
 
 
 class ConnectorType(Enum):
-    BinanceFuture = 0
-    OkxFuture = 1
+    BINANCE_FUTURE = 0
+    OKX_FUTURE = 1
 
 
 class ConnectorBase(ABC):
@@ -34,8 +34,15 @@ class ConnectorBase(ABC):
         """
         self._config = config
         self._logger = get_logger(self.__module__)
-        # Start background tasks to update data from exchanges
-        asyncio.create_task(self._start_network(), name=f"Task_ConnectorBase_start_network")
+        self._start_background_tasks()
+
+    def _start_background_tasks(self):
+        """
+        Start background tasks for network connections and data updates.
+        """
+        asyncio.create_task(self._start_network(), name=f"Task_{self.__class__.__name__}_Network")
+        asyncio.create_task(self._instruments_spec_polling_loop(), name=f"Task_{self.__class__.__name__}_InstrumentsSpec")
+        asyncio.create_task(self._candles_polling_loop(), name=f"Task_{self.__class__.__name__}_Candles")
 
     @abstractmethod
     async def _start_network(self):
@@ -72,8 +79,8 @@ class ConnectorBase(ABC):
                 await self._update_instruments_spec()
                 await asyncio.sleep(60 * 30)
             except Exception as e:
-                self._logger.error(f"Error while fetching instruments spec: {str(e)}\n{traceback.format_exc()}")
-                time.sleep(1)
+                self._logger.error(f"Error while fetching instruments spec: {e}\n{traceback.format_exc()}")
+                await asyncio.sleep(5)
 
     @abstractmethod
     async def _update_instruments_spec(self):
@@ -105,8 +112,8 @@ class ConnectorBase(ABC):
                 await self._update_candles()
                 await asyncio.sleep(1)
             except Exception as e:
-                self._logger.error(f"Error while fetching candles: {str(e)}\n{traceback.format_exc()}")
-                await asyncio.sleep(1)
+                self._logger.error(f"Error while fetching candles: {e}\n{traceback.format_exc()}")
+                await asyncio.sleep(5)
 
     @abstractmethod
     async def _update_candles(self):
@@ -127,21 +134,6 @@ class ConnectorBase(ABC):
 
         Returns:
             List[dict]: List of candle dictionaries with keys Date, O, H, L, C, V.
-        """
-        pass
-
-    @abstractmethod
-    async def get_last_formed_candles(self, symbol: str, timeframe: Timeframe, n: int) -> List[dict]:
-        """
-        Retrieve the last n formed (closed) candles, excluding the current unformed candle.
-
-        Args:
-            symbol (str): Trading pair symbol.
-            timeframe (Timeframe): Candle timeframe.
-            n (int): Number of candles to retrieve.
-
-        Returns:
-            List[dict]: List of candle dictionaries.
         """
         pass
 
@@ -168,19 +160,6 @@ class ConnectorBase(ABC):
 
         Returns:
             Order: Updated order object.
-        """
-        pass
-
-    @abstractmethod
-    async def get_last_open_orders(self, order: Order) -> Dict[str, Order]:
-        """
-        Fetch all open orders for a symbol.
-
-        Args:
-            order (Order): Order object containing the symbol to query.
-
-        Returns:
-            Dict[str, Order]: Dictionary of open orders keyed by order ID.
         """
         pass
 
@@ -227,7 +206,6 @@ class ConnectorBase(ABC):
     # -------------------------------
     # COMMON Order Helpers
     # -------------------------------
-
     async def create_limit_order(self, symbol: str, side: Direction, price: Decimal, qty: Decimal) -> Order:
         """
         Create a limit order.
@@ -256,57 +234,3 @@ class ConnectorBase(ABC):
             Order: Created order object.
         """
         return await self.create_order(symbol, side, OrderType.MARKET, qty=qty)
-
-    async def create_limit_buy_order(self, symbol: str, price: Decimal, qty: Decimal) -> Order:
-        """
-        Create a limit buy order.
-
-        Args:
-            symbol (str): Trading pair symbol.
-            price (Decimal): Order price.
-            qty (Decimal): Order quantity in base currency.
-
-        Returns:
-            Order: Created order object.
-        """
-        return await self.create_limit_order(symbol, Direction.BUY, price, qty)
-
-    async def create_limit_sell_order(self, symbol: str, price: Decimal, qty: Decimal) -> Order:
-        """
-        Create a limit sell order.
-
-        Args:
-            symbol (str): Trading pair symbol.
-            price (Decimal): Order price.
-            qty (Decimal): Order quantity in base currency.
-
-        Returns:
-            Order: Created order object.
-        """
-        return await self.create_limit_order(symbol, Direction.SELL, price, qty)
-
-    async def create_market_buy_order(self, symbol: str, qty: Decimal) -> Order:
-        """
-        Create a market buy order.
-
-        Args:
-            symbol (str): Trading pair symbol.
-            qty (Decimal): Order quantity in base currency.
-
-        Returns:
-            Order: Created order object.
-        """
-        return await self.create_market_order(symbol, Direction.BUY, qty)
-
-    async def create_market_sell_order(self, symbol: str, qty: Decimal) -> Order:
-        """
-        Create a market sell order.
-
-        Args:
-            symbol (str): Trading pair symbol.
-            qty (Decimal): Order quantity in base currency.
-
-        Returns:
-            Order: Created order object.
-        """
-        return await self.create_market_sell_order(symbol, Direction.SELL, qty)
