@@ -19,10 +19,10 @@ async def main_async():
         # Wait for network initialization
         await asyncio.sleep(1)
 
-        # 1. Get instrument spec (uncomment to test)
-        # instrument: Instrument = await connector_binance.get_instrument_spec(symbol='ETHUSDT')
-        # print('Instrument Spec:')
-        # print(instrument.__dict__)
+        # 1. Get instrument spec
+          instrument: Instrument = await connector_binance.get_instrument_spec(symbol='ETHUSDT')
+          print('Instrument Spec:')
+          print(instrument.__dict__)
 
         # 2. Get instrument candles
         candles = await connector_binance.get_last_candles(symbol='ETHUSDT',
@@ -31,17 +31,17 @@ async def main_async():
         print('Candles:')
         print(candles)
 
-        # 3. Test order creation (uncomment to test)
-        # order = await connector_binance.create_limit_buy_order(
-        #     symbol='ETHUSDT',
-        #     price=Decimal('3000'),
-        #     qty=Decimal('0.01')
-        # )
-        # print('Created Order:', order.id)
+        # 3. Test order creation 
+        order = await connector_binance.create_limit_buy_order(
+             symbol='ETHUSDT',
+             price=Decimal('3000'),
+             qty=Decimal('0.01')
+         )
+        print('Created Order:', order.id)
 
-        # 4. Test balance fetching (uncomment to test)
-        # balance = await connector_binance.get_last_balance()
-        # print('Balance:', {k: v.__dict__ for k, v in balance.items()})
+        # 4. Test balance fetching
+        balance = await connector_binance.get_last_balance()
+        print('Balance:', {k: v.__dict__ for k, v in balance.items()})
 
         # List background tasks
         all_tasks = asyncio.all_tasks()
